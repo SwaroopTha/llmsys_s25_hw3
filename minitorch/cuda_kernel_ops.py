@@ -406,7 +406,7 @@ class CudaKernelOps(TensorOps):
     @staticmethod
     def attn_softmax_bw(out_grad: Tensor, soft_inp: Tensor):
       #   BEGIN ASSIGN3_1
-      raise("Not implemented")
+      batch_size, nhead, from_len, to_len = soft_inp.shape
       #   END ASSIGN3_1
 
     @staticmethod

@@ -13,7 +13,6 @@ import math
 def tile(input: Tensor, kernel: Tuple[int, int]) -> Tuple[Tensor, int, int]:
     """
     Reshape an image tensor for 2D pooling
-
     Args:
         input: batch x channel x height x width
         kernel: height x width of pooling
@@ -40,7 +39,6 @@ def tile(input: Tensor, kernel: Tuple[int, int]) -> Tuple[Tensor, int, int]:
 def avgpool2d(input: Tensor, kernel: Tuple[int, int]) -> Tensor:
     """
     Tiled average pooling 2D
-
     Args:
         input : batch x channel x height x width
         kernel : height x width of pooling
@@ -65,15 +63,11 @@ else:
 def argmax(input: Tensor, dim: int) -> Tensor:
     """
     Compute the argmax as a 1-hot tensor.
-
     Args:
         input : input tensor
         dim : dimension to apply argmax
-
-
     Returns:
         :class:`Tensor` : tensor with 1 on highest cell in dim, 0 otherwise
-
     """
     out = max_reduce(input, dim)
     return out == input
@@ -105,11 +99,7 @@ def max(input: Tensor, dim: int) -> Tensor:
 def softmax(input: Tensor, dim: int) -> Tensor:
     r"""
     Compute the softmax as a tensor.
-
-
-
     $z_i = \frac{e^{x_i}}{\sum_i e^{x_i}}$
-
     Args:
         input : input tensor
         dim : dimension to apply softmax
@@ -210,7 +200,7 @@ def GELU(input: Tensor) -> Tensor:
     https://pytorch.org/docs/stable/generated/torch.nn.GELU.html
     """
     # COPY FROM ASSIGN2_2
-    raise NotImplementedError
+    return 0.5 * input * (1 + (np.sqrt(2 / math.pi) * (input + 0.044715 * input**3)).tanh())
 
 
 def logsumexp(input: Tensor, dim: int) -> Tensor:
@@ -226,7 +216,8 @@ def logsumexp(input: Tensor, dim: int) -> Tensor:
             NOTE: minitorch functions/tensor functions typically keep dimensions if you provide a dimensions.
     """  
     # COPY FROM ASSIGN2_2
-    raise NotImplementedError
+    x_star = max(input, dim)
+    return x_star + (input - x_star).exp().sum(dim).log()
 
 
 def one_hot(input: Tensor, num_classes: int) -> Tensor:
@@ -237,8 +228,10 @@ def one_hot(input: Tensor, num_classes: int) -> Tensor:
     Hint: You may want to use a combination of np.eye, tensor_from_numpy, 
     """
     # COPY FROM ASSIGN2_2
-    raise NotImplementedError
-
+    return tensor_from_numpy(
+        np.eye(num_classes)[input.to_numpy().astype(int)],
+        backend=input.backend
+    )
 
 def softmax_loss(logits: Tensor, target: Tensor) -> Tensor:
     """Softmax + Cross Entropy Loss function with 'reduction=None'.
@@ -254,6 +247,10 @@ def softmax_loss(logits: Tensor, target: Tensor) -> Tensor:
     result = None
     
     # COPY FROM ASSIGN2_2
-    raise NotImplementedError
+    batch_size = logits.shape[0]
+    target = one_hot(target, logits.shape[1])
+
+    log_sum_exp = logsumexp(logits, dim=1)
+    result = log_sum_exp - (logits * target).sum(dim=1)
     
     return result.view(batch_size, )

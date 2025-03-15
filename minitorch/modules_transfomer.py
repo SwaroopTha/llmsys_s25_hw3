@@ -45,7 +45,13 @@ class MultiHeadAttention(Module):
         self.attn_hidden_dim = n_embd // n_head
 
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        self.q_projection = Linear(n_embd, n_embd, bias=bias, backend=backend)
+        self.k_projection = Linear(n_embd, n_embd, bias=bias, backend=backend)
+        self.v_projection = Linear(n_embd, n_embd, bias=bias, backend=backend)
+        self.out_projection = Linear(n_embd, n_embd, bias=bias, backend=backend)
+        self.dropout = Dropout(p_dropout)
+
+
 
     def create_causal_mask(self, bs, nh, seq_len):
         """
@@ -69,7 +75,10 @@ class MultiHeadAttention(Module):
         batch_size, seq_len, n_embd = x.shape
         
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        x = x.view(batch_size * seq_len, n_embd) # [batch_size * seq_len, n_embd]
+        q = self.q_projection(x).view(batch_size, seq_len, self.n_head, self.attn_hidden_dim).permute(0, 2, 1, 3)
+        kT = self.k_projection(x).view(batch_size, seq_len, self.n_head, self.attn_hidden_dim).permute(0, 2, 3, 1)
+        v = self.v_projection(x).view(batch_size, seq_len, self.n_head, self.attn_hidden_dim).permute(0, 2, 1, 3)
         
         return q, kT, v
 
@@ -135,7 +144,9 @@ class FeedForward(Module):
             dropout    : dropout layer
         """
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        self.linear_in  = Linear(n_embd, middle_dim, bias=bias, backend=backend)
+        self.linear_out = Linear(middle_dim, n_embd, bias=bias, backend=backend)
+        self.dropout    = Dropout(p_dropout)
 
     def forward(self, x):
         """A FFN Module in a Pre-LN Transformer with GELU Activation and dropout.
@@ -149,7 +160,8 @@ class FeedForward(Module):
         batch_size, seq_len, n_embd = x.shape
 
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        x = GELU(self.linear_in(x.view(batch_size * seq_len, n_embd)))
+        x = self.dropout(self.linear_out(x)).view(batch_size, seq_len, n_embd)
 
         return x
 
