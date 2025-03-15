@@ -427,12 +427,45 @@ class CudaKernelOps(TensorOps):
         stream_1
       )
 
+      return out_grad
+
       #   END ASSIGN3_1
 
     @staticmethod
     def layernorm_fw(inp: Tensor, gamma: Tensor, beta: Tensor):
-      #   BEGIN ASSIGN3_2
-      raise("Not implemented")
+      # BEGIN ASSIGN3_2
+      batch_size, hidden_dim = inp.shape
+      stream_1 = torch.cuda.current_stream().cuda_stream
+      
+      ln_res = inp.zeros(inp.shape)
+      mean = inp.zeros((batch_size, 1))
+      var = inp.zeros((batch_size, 1))
+
+      lib_layernorm.launch_layernorm.argtypes = [
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p
+      ]
+
+      lib_layernorm.launch_layernorm.restype = None
+
+      lib_layernorm.launch_layernorm(
+        ln_res._tensor._storage,
+        mean._tensor._storage,
+        var._tensor._storage,
+        inp._tensor._storage,
+        gamma._tensor._storage,
+        batch_size,
+        hidden_dim,
+        stream_1
+      )
+      
+      return ln_res, mean, var
       #   END ASSIGN3_2
       
     @staticmethod
