@@ -55,16 +55,16 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   }
 
   // Step 2
-  l_sum = blockReduce<ReduceType::kSum>(l_sum);
-  l_sq_sum = blockReduce<ReduceType::kSum>(l_sq_sum);
+  blockReduce<ReduceType::kSum, 1>(l_sum);
+  blockReduce<ReduceType::kSum, 1>(l_sq_sum);
   __shared__ float s_mean, s_var;
   if (threadIdx.x == 0 ) {
-    s_mean = l_sum / hidden_size;
-    s_var = l_sq_sum / hidden_size - s_mean * s_mean + LN_EPSILON;
+    s_mean = l_sum / (hidden_size * 4);
+    s_var = l_sq_sum / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
     if (means) {
       means[blockIdx.x] = s_mean;
     }
-    vars[blockIdx.x] = s_var
+    vars[blockIdx.x] = s_var;
   }
 
 
