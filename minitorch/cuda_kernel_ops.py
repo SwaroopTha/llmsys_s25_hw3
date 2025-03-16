@@ -447,6 +447,7 @@ class CudaKernelOps(TensorOps):
         np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
         np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
         np.ctypeslib.ndpointer(dtype=datatype, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_void_p
@@ -460,6 +461,7 @@ class CudaKernelOps(TensorOps):
         var._tensor._storage,
         inp._tensor._storage,
         gamma._tensor._storage,
+        beta._tensor._storage,
         batch_size,
         hidden_dim,
         stream_1

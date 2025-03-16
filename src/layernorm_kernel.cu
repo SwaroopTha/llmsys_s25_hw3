@@ -47,6 +47,8 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   // Step 1
   float l_sum = 0;
   float l_sq_sum = 0; // compute x^2 also
+
+
   const float4 *inp_f4 = reinterpret_cast<const float4 *>(inp) + blockIdx.x * hidden_size;  
   for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float4 val = inp_f4[idx];
@@ -55,32 +57,35 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   }
 
   // Step 2
-  blockReduce<ReduceType::kSum, 1>(l_sum);
-  blockReduce<ReduceType::kSum, 1>(l_sq_sum);
+  float block_combo[2] = {l_sum, l_sq_sum};
+  blockReduce<ReduceType::kSum, 2>(block_combo);
   __shared__ float s_mean, s_var;
   if (threadIdx.x == 0 ) {
-    s_mean = l_sum / (hidden_size * 4);
-    s_var = l_sq_sum / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
+    s_mean = block_combo[0] / (hidden_size * 4); // multiply by 4 b/c of float4
+    s_var = block_combo[1] / (hidden_size * 4) - s_mean * s_mean + LN_EPSILON;
     if (means) {
       means[blockIdx.x] = s_mean;
     }
-    vars[blockIdx.x] = s_var;
+    vars[blockIdx.x] = s_var
   }
+
+  // Sync to make sure all threads have written the shared memory
+  __syncthreads();
 
 
   // Step 3
   float4 *ln_res_f4 = reinterpret_cast<float4 *>(ln_res) + blockIdx.x * hidden_size;
-  const float4 *scale_f4 = reinterpret_cast<const float4 *>(scale);
-  const float4 *bias_f4 = reinterpret_cast<const float4 *>(bias);
 
   for (uint idx = threadIdx.x; idx < hidden_size / 4; idx += blockDim.x) {
     float4 val = inp_f4[idx];
-    float4 scale_val = scale_f4[idx];
-    float4 bias_val = bias_f4[idx];
-    val.x = (val.x - s_mean) * rsqrtf(s_var) * scale_val.x + bias_val.x;
-    val.y = (val.y - s_mean) * rsqrtf(s_var) * scale_val.y + bias_val.y;
-    val.z = (val.z - s_mean) * rsqrtf(s_var) * scale_val.z + bias_val.z;
-    val.w = (val.w - s_mean) * rsqrtf(s_var) * scale_val.w + bias_val.w;
+    float4 scale_val = (reinterpret_cast<const float4 *>(scale))[idx];
+    float4 bias_val = (reinterpret_cast<const float4 *>(bias))[idx];
+    
+    
+    val.x = (val.x - s_mean) * rsqrt(s_var) * scale_val.x + bias_val.x;
+    val.y = (val.y - s_mean) * rsqrt(s_var) * scale_val.y + bias_val.y;
+    val.z = (val.z - s_mean) * rsqrt(s_var) * scale_val.z + bias_val.z;
+    val.w = (val.w - s_mean) * rsqrt(s_var) * scale_val.w + bias_val.w;
     ln_res_f4[idx] = val;
   }
 
