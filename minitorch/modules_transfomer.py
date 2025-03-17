@@ -289,24 +289,24 @@ class DecoderLM(Module):
         self.n_vocab             = n_vocab
         
         # COPY FROM ASSIGN2_4
-        # self.token_embeddings    = 
-        # self.position_embeddings = 
-        # self.t_layer_1           = 
-        # self.t_layer_2           = 
-        # self.t_layer_3           = 
-        # self.t_layer_4           = 
-        # self.dropout             = 
-        # self.lm_head             = 
-        raise NotImplementedError
+        self.token_embeddings    = Embedding(n_vocab, n_embd, backend)
+        self.position_embeddings = Embedding(n_positions, n_embd, backend)
+        self.t_layer_1           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
+        self.t_layer_2           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
+        self.t_layer_3           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
+        self.t_layer_4           = TransformerLayer(n_embd, n_head, p_dropout, ln_eps, bias, backend, use_fused_kernel)
+        self.dropout             = Dropout(p_dropout)
+        self.lm_head             = Linear(n_embd, n_vocab, bias=bias, backend=backend)
+        # raise NotImplementedError
 
         self.use_fused_kernel = use_fused_kernel
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            # self.ln                  = 
-            raise NotImplementedError
+            self.ln                  = LayerNorm1d(n_embd, ln_eps, backend=backend)
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            # raise NotImplementedError
+            self.ln = FusedLayerNorm1d(n_embd, ln_eps, backend=backend)
             # END ASSIGN3_3
         
     def forward(self, idx):
@@ -321,12 +321,27 @@ class DecoderLM(Module):
         batch_size, seq_len = idx.shape
         pos = tensor([i for i in range(seq_len)], backend=self.backend).view(1, seq_len)
 
-        if not self.use_fused_kernel:
-            # COPY FROM ASSIGN2_4
-            raise NotImplementedError
-        else:
-            # BEGIN ASSIGN3_3
-            raise NotImplementedError
-            # END ASSIGN3_3
+        pos = self.position_embeddings(pos)
+        x = self.dropout(self.token_embeddings(x) + pos)
+
+        x = self.t_layer_1(x)
+        x = self.t_layer_2(x)
+        x = self.t_layer_3(x)
+        x = self.t_layer_4(x)
+
+        x = x.view(batch_size * seq_len, self.n_embd)
+        x = self.ln(x)
+        x = x.view(batch_size, seq_len, self.n_embd)
+
+        x = x.view(batch_size * seq_len, self.n_embd)
+        x = self.lm_head(x).view(batch_size, seq_len, self.n_vocab)
+
+        # if not self.use_fused_kernel:
+        #     # COPY FROM ASSIGN2_4
+        #     raise NotImplementedError
+        # else:
+        #     # BEGIN ASSIGN3_3
+        #     raise NotImplementedError
+        #     # END ASSIGN3_3
 
         return x
