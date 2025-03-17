@@ -5,7 +5,8 @@ from .modules_basic import (
     Embedding,
     Dropout,
     LayerNorm1d,
-    Linear
+    Linear,
+    FusedLayerNorm1d,
 )
 from .tensor_ops import TensorBackend
 from .nn import (
@@ -102,13 +103,23 @@ class MultiHeadAttention(Module):
         _, _, _, v_dim = v.shape
         assert q_dim == k_dim == v_dim
         result = None
-        
+
+        attn_scores = (q @ kT) / (q_dim ** 0.5)
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            raise NotImplementedError
+            M = self.create_casual_mask(batch_size, num_head, queries_len) if self.causal else None
+            if M is not None:
+                attn_scores += M
+            attn_weights = softmax(attn_scores, dim=3)
+            output = attn_weights @ v
+            result = output.permute(0, 2, 1, 3).contiguous().view(batch_size, queries_len, num_head * q_dim)
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            M = tensor_from_numpy(np.zeros((1, 1, queries_len, queries_len), dtype=datatype), backend=self.backend)
+            if self.causal:
+                attn_scores += self.create_causal_mask(batch_size, num_head, queries_len)
+            result = attn_scores.attn_softmax(M) @ v # apply the cuda kernel
+            result = result.permute(0, 2, 1, 3).contiguous().view(batch_size, queries_len, num_head * q_dim)
             # END ASSIGN3_3
 
         return result
@@ -124,8 +135,13 @@ class MultiHeadAttention(Module):
         """
         batch_size, seq_len, n_embd = x.shape
         # COPY FROM ASSIGN2_4
-        raise NotImplementedError
+        q, kT, v = self.project_to_query_key_value(x)
+        attn_weights = self.self_attention(q, kT, v)
 
+        output = attn_weights.view(batch_size * seq_len, self.n_embd)
+        output = self.out_projection(output).view(batch_size, seq_len, self.n_embd)
+
+        return output
 
 class FeedForward(Module):
     def __init__(self, n_embd: int, middle_dim: int=256, p_dropout: float=0.1, bias: bool=True, backend: TensorBackend=None):
@@ -185,19 +201,18 @@ class TransformerLayer(Module):
         """
         
         # COPY FROM ASSIGN2_4
-        # self.attention
-        # self.ff
-        raise NotImplementedError
+        self.attention = MultiHeadAttention(n_embd, n_head, causal=True, p_dropout=p_dropout, bias=bias, backend=backend, use_fused_kernel=use_fused_kernel)
+        self.ff = FeedForward(n_embd, p_dropout=p_dropout, bias=bias, backend=backend)
 
         self.use_fused_kernel = use_fused_kernel
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            # self.ln_1
-            # self.ln_2
-            raise NotImplementedError
+            self.ln_1 = LayerNorm1d(n_embd, ln_eps, backend=backend)
+            self.ln_2 = LayerNorm1d(n_embd, ln_eps, backend=backend)
         else:
             # BEGIN ASSIGN3_3
-            raise NotImplementedError
+            self.ln_1 = FusedLayerNorm1d(n_embd, ln_eps, backend=backend)
+            self.ln_2 = FusedLayerNorm1d(n_embd, ln_eps, backend=backend)
             # END ASSIGN3_3
 
     def forward(self, x):
@@ -207,14 +222,28 @@ class TransformerLayer(Module):
         Ouput: the hidden states after the Transformer Layer `x` with shape (batch_size, seq_len, x_dim)
         """
         batch_size, seq_len, x_dim = x.shape
+        residual = x
+
+        x = x.view(batch_size * seq_len, x_dim)
+        x = self.ln_1(x)
+        x = x.view(batch_size, seq_len, x_dim)
+
+        attn_out = self.attention(x) + residual
+        residual = attn_out
+
+        x = attn_out.view(batch_size * seq_len, x_dim)
+        x = self.ln_2(x)
+        x = x.view(batch_size, seq_len, x_dim)
+
+        x = self.ff(x) + residual
         
-        if not self.use_fused_kernel:
-            # COPY FROM ASSIGN2_4
-            raise NotImplementedError
-        else:
-            # BEGIN ASSIGN3_3
-            raise NotImplementedError
-            # END ASSIGN3_3
+        # if not self.use_fused_kernel:
+        #     # COPY FROM ASSIGN2_4
+
+        # else:
+        #     # BEGIN ASSIGN3_3
+        #     raise NotImplementedError
+        #     # END ASSIGN3_3
 
         return x
 

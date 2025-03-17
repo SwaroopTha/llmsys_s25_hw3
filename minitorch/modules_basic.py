@@ -176,3 +176,14 @@ class LayerNorm1d(Module):
         z = (x - mean) / (var + self.eps) ** 0.5
 
         return self.weights.value * z + self.bias.value
+    
+class FusedLayerNorm1d(Module):
+    def __init__(self, dim: int, eps: float, backend: TensorBackend):
+        self.dim = dim
+        self.eps = eps
+
+        self.weights = Parameter(ones((self.dim,), backend=backend))
+        self.bias = Parameter(zeros((self.dim,), backend=backend))
+    
+    def forward(self, x: Tensor) -> Tensor:
+        return x.layernorm(self.weights.value, self.bias.value)
