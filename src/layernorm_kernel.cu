@@ -57,6 +57,8 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   }
 
   // Step 2
+
+  // combine the sum and square sum for less overhead
   float block_combo[2] = {l_sum, l_sq_sum};
   blockReduce<ReduceType::kSum, 2>(block_combo);
   __shared__ float s_mean, s_var;
@@ -66,7 +68,7 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
     if (means) {
       means[blockIdx.x] = s_mean;
     }
-    vars[blockIdx.x] = s_var
+    vars[blockIdx.x] = s_var;
   }
 
   // Sync to make sure all threads have written the shared memory
@@ -76,7 +78,7 @@ __global__ void ker_layer_norm(T *ln_res, T *vars, T *means, const T *inp,
   // Step 3
   float4 *ln_res_f4 = reinterpret_cast<float4 *>(ln_res) + blockIdx.x * hidden_size;
 
-  for (uint idx = threadIdx.x; idx < hidden_size / 4; idx += blockDim.x) {
+  for (uint idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float4 val = inp_f4[idx];
     float4 scale_val = (reinterpret_cast<const float4 *>(scale))[idx];
     float4 bias_val = (reinterpret_cast<const float4 *>(bias))[idx];
@@ -211,14 +213,52 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
 
   // Step 1
+  int col_idx = blockIdx.x * TILE_DIM + threadIdx.x;
+  float partial_dbetta = 0.0f;
+  float partial_dgamma = 0.0f;
+
+  if (col_idx < width) {
+    // loop to compute partial gradients
+    for (int row = threadIdx.y; row < rows; row += TILE_DIM) {
+      // get output at (row, col)
+      float dout = static_cast<float>(out_grad[row * width + col_idx]);
+
+      // compute normalized input (xhat)
+      float mean = static_cast<float>(means[row]);
+      float var = static_cast<float>(vars[row]);
+      float std_inv = rsqrtf(var + LN_EPSILON);
+      float input_val = static_cast<float>(inp[row * width + col_idx]);
+      float xhat = (input_val - mean) * std_inv;
+
+      // accumulate partial gradients
+      partial_dbetta += dout;
+      partial_dgamma += xhat * dout;
+
+    }
+  }
 
   // Step 2
+  betta_buffer[threadIdx.y][threadIdx.x] = partial_dbetta;
+  gamma_buffer[threadIdx.y][threadIdx.x] = partial_dgamma;
+  __syncthreads();
+
+  float betta_sum = betta_buffer[threadIdx.x][threadIdx.y];
+  float gamma_sum = gamma_buffer[threadIdx.x][threadIdx.y];
   
   // Step 3
+  for (int stride = TILE_DIM / 2; stride > 0; stride /= 2) {
+    betta_sum += g.shfl_down(betta_sum, stride);
+    gamma_sum += g.shfl_down(gamma_sum, stride);
+  }
   
   // Step 4
-
-  assert(false && "Not Implemented");
+  if (g.thread_rank() == 0) {
+    int output_col = blockIdx.x * TILE_DIM + threadIdx.y;
+    if (output_col < width) {
+      betta_grad[output_col] = betta_sum;
+      gamma_grad[output_col] = gamma_sum;
+    }
+  }
   /// END ASSIGN3_2
 }
 
@@ -265,15 +305,85 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
   // 3. Compute reduce sum for dxhat and dxhat*xhat with blockReduce
   // 4. Compute final gradient
   
-  // Step 1
- 
-  // Step 2
+  // Step 1 : Compute dxhat=dy*w
+  float dxhat_sum = 0.0f;
+  float dxhat_xhat_sum = 0.0f;
+
+  // get batch index
+  int batch_idx = blockIdx.x;
+  float mean = means[batch_idx];
+  float var = vars[batch_idx];
+  float std_inv = rsqrt(var + LN_EPSILON);
+
+  // process elements with float4
+  for (int i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+    float4 input_val = reinterpret_cast<const float4 *>(inp)[batch_idx * hidden_dim + i];
+    float4 xhat;
+
+    // Step 2 : Compute xhat with reinterpret_cast by casting to float4 for speedup
+    xhat.x = (input_val.x - mean) * std_inv;
+    xhat.y = (input_val.y - mean) * std_inv;
+    xhat.z = (input_val.z - mean) * std_inv;
+    xhat.w = (input_val.w - mean) * std_inv;
+
+    // compute dxhat=dy*w
+    float4 out_grad_val = reinterpret_cast<const float4 *>(out_grad)[batch_idx * hidden_dim + i];
+    float4 gamma_val = reinterpret_cast<const float4 *>(gamma)[i];
+
+    float4 dxhat;
+    dxhat.x = out_grad_val.x * gamma_val.x;
+    dxhat.y = out_grad_val.y * gamma_val.y;
+    dxhat.z = out_grad_val.z * gamma_val.z;
+    dxhat.w = out_grad_val.w * gamma_val.w;
+
+    // accumulate dxhat and dxhat*xhat
+    dxhat_sum += dxhat.x + dxhat.y + dxhat.z + dxhat.w;
+    dxhat_xhat_sum += dxhat.x * xhat.x + dxhat.y * xhat.y + dxhat.z * xhat.z + dxhat.w * xhat.w;
+  }
+
    
-  // Step 3
+  // Step 3: reduce sum for dxhat and dxhat*xhat with blockReduce
+  float block_combo[2] = {dxhat_sum, dxhat_xhat_sum};
+  blockReduce<ReduceType::kSum, 2>(block_combo);
+  __shared__ float s_dxhat_sum, s_dxhat_xhat_sum;
+  if (threadIdx.x == 0) {
+    // average with hidden_dim
+    s_dxhat_sum = block_combo[0] / (hidden_dim * 4);
+    s_dxhat_xhat_sum = block_combo[1] / (hidden_dim * 4);
+  }
+  __syncthreads();
+
  
-  // Step 4
-  
-  assert(false && "Not Implemented");
+  // Step 4: Compute final gradient
+  for (int i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+    // load the values
+    float4 input_val = reinterpret_cast<const float4 *>(inp)[batch_idx * hidden_dim + i];
+    float4 out_grad_val = reinterpret_cast<const float4 *>(out_grad)[batch_idx * hidden_dim + i];
+    float4 gamma_val = reinterpret_cast<const float4 *>(gamma)[i];
+
+    // compute xhat
+    float4 xhat;
+    xhat.x = (input_val.x - mean) * std_inv;
+    xhat.y = (input_val.y - mean) * std_inv;
+    xhat.z = (input_val.z - mean) * std_inv;
+    xhat.w = (input_val.w - mean) * std_inv;
+
+    // compute dxhat
+    float4 dxhat;
+    dxhat.x = out_grad_val.x * gamma_val.x;
+    dxhat.y = out_grad_val.y * gamma_val.y;
+    dxhat.z = out_grad_val.z * gamma_val.z;
+    dxhat.w = out_grad_val.w * gamma_val.w;
+
+    // compute final gradient
+    float4 final_grad;
+    final_grad.x = (dxhat.x - (s_dxhat_sum + xhat.x * s_dxhat_xhat_sum)) * std_inv;
+    final_grad.y = (dxhat.y - (s_dxhat_sum + xhat.y * s_dxhat_xhat_sum)) * std_inv;
+    final_grad.z = (dxhat.z - (s_dxhat_sum + xhat.z * s_dxhat_xhat_sum)) * std_inv;
+    final_grad.w = (dxhat.w - (s_dxhat_sum + xhat.w * s_dxhat_xhat_sum)) * std_inv;
+
+    reinterpret_cast<float4 *>(inp_grad)[batch_idx * hidden_dim + i] = final_grad;
+  }  
   /// END ASSIGN3_2
 }
 extern "C" {
