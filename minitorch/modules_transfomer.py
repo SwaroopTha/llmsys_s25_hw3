@@ -107,7 +107,7 @@ class MultiHeadAttention(Module):
         attn_scores = (q @ kT) / (q_dim ** 0.5)
         if not self.use_fused_kernel:
             # COPY FROM ASSIGN2_4
-            M = self.create_casual_mask(batch_size, num_head, queries_len) if self.causal else None
+            M = self.create_causal_mask(batch_size, num_head, queries_len) if self.causal else None
             if M is not None:
                 attn_scores += M
             attn_weights = softmax(attn_scores, dim=3)
@@ -322,7 +322,7 @@ class DecoderLM(Module):
         pos = tensor([i for i in range(seq_len)], backend=self.backend).view(1, seq_len)
 
         pos = self.position_embeddings(pos)
-        x = self.dropout(self.token_embeddings(x) + pos)
+        x = self.dropout(self.token_embeddings(idx) + pos)
 
         x = self.t_layer_1(x)
         x = self.t_layer_2(x)
