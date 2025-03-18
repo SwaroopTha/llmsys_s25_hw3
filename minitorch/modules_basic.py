@@ -179,6 +179,7 @@ class LayerNorm1d(Module):
     
 class FusedLayerNorm1d(Module):
     def __init__(self, dim: int, eps: float, backend: TensorBackend):
+        super().__init__()
         self.dim = dim
         self.eps = eps
 
