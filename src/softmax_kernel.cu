@@ -184,7 +184,7 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
     // block reduce max : reduce the max value of each token in the block
     blockReduce<ReduceType::kMax, token_per_reduce>(l_max); 
     // write shared
-    __shared__ float s_max[token_per_reduce];
+    __shared__ float s_max[token_per_reduce]; // s_max will store the max value of each token in the block
     if (threadIdx.x == 0) {
       for (int i = 0; i < token_per_reduce; i++) {
         s_max[i] = l_max[i];
@@ -212,6 +212,7 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
     __shared__ float s_sum[token_per_reduce];
     if (threadIdx.x == 0) {
       for (int i = 0; i < token_per_reduce; i++) {
+        // compute the sum of the exp values of each token in the block
         s_sum[i] = __fdividef(1.0f, l_sum[i] + EPSILON);
       }
     }
@@ -221,7 +222,7 @@ __global__ void ker_attn_softmax(T *inp, const T *attn_mask, int from_len,
     // BEGIN ASSIGN3_1
     for (int i = 0; i < token_per_reduce && (token_id + i) < from_len; i++) {
       for (int j = 0; j < ele_per_thread; j++) {
-        // compute the final result
+        // compute the final result by multiplying the exp value with the sum
         inp_val[i][j] = (T)(val[i][j] * s_sum[i]);
       }
       BlockStore(ts_store).Store(inp + (token_id + i) * to_len, inp_val[i],
@@ -362,52 +363,61 @@ void launch_attn_softmax_bw(float *out_grad,
   dim3 block_dim(WARP_SIZE, warps_per_block);
   // BEGIN ASSIGN3_1
   
-  
   // Launch kernel
   int float_size = sizeof(float);
-  int out_grad_size = rows * softmax_len * float_size;
-  int soft_inp_size = rows * softmax_len * float_size;
+  int og_shape = rows * softmax_len * float_size;
+  int inp_shape = rows * softmax_len * float_size;
 
-  float *d_out_grad, *d_soft_inp;
-  cudaMalloc((void **)&d_out_grad, out_grad_size);
-  cudaMalloc((void **)&d_soft_inp, soft_inp_size);
+  // Allocate memory on device
+  float *d_og, *d_inp;
+  cudaMalloc((void **)&d_og, og_shape);
+  cudaMalloc((void **)&d_inp, inp_shape);
 
-  cudaMemcpy(d_out_grad, out_grad, out_grad_size, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_soft_inp, soft_inp, soft_inp_size, cudaMemcpyHostToDevice);
+  // Copy data to device
+  cudaMemcpy(d_og, out_grad, og_shape, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_inp, soft_inp, inp_shape, cudaMemcpyHostToDevice);
 
 
   // Hint: use ker_attn_softmax_bw<float, ITERATIONS> depending on softmax_len
+  /*In lectures, we described the use of templates for tuning kernel parameters. 
+  When implementing launch_attn_softmax_bw, you should compute the ITERATIONS 
+  parameter of ker_attn_softmax_bw depending on different max sequence lengths 
+  in {32, 64, 128, 256, 384, 512, 768, 1024, 2048}.
+  */
   if (softmax_len <= 32) {
     ker_attn_softmax_bw<float, 32 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
   } else if (softmax_len <= 64) {
     ker_attn_softmax_bw<float, 64 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
   } else if (softmax_len <= 128) {
     ker_attn_softmax_bw<float, 128 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
   } else if (softmax_len <= 256) {
     ker_attn_softmax_bw<float, 256 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
   } else if (softmax_len <= 384) {
     ker_attn_softmax_bw<float, 384 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
   } else if (softmax_len <= 512) {
     ker_attn_softmax_bw<float, 512 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
+  } else if (softmax_len <= 768) {
+    ker_attn_softmax_bw<float, 768 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
+        d_og, d_inp, softmax_len);
   } else if (softmax_len <= 1024) {
     ker_attn_softmax_bw<float, 1024 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
   } else if (softmax_len <= 2048) {
     ker_attn_softmax_bw<float, 2048 / WARP_SIZE><<<grid_dim, block_dim, 0, stream>>>(
-        d_out_grad, d_soft_inp, softmax_len);
+        d_og, d_inp, softmax_len);
   } else {
     throw std::runtime_error(
         "Sequence length greater than 512 is currently not supported");
   }
   
   // Copy back to the host
-  cudaMemcpy(out_grad, d_out_grad, out_grad_size, cudaMemcpyDeviceToHost);
+  cudaMemcpy(out_grad, d_og, og_shape, cudaMemcpyDeviceToHost);
   cudaDeviceSynchronize();
 
   // Check CUDA execution
@@ -416,12 +426,10 @@ void launch_attn_softmax_bw(float *out_grad,
     fprintf(stderr, "launch_attn_softmax_bw Error: %s\n", cudaGetErrorString(err));
     exit(EXIT_FAILURE);
   }
-  
-  
 
   // Free memory on device
-  cudaFree(d_out_grad);
-  cudaFree(d_soft_inp);
+  cudaFree(d_og);
+  cudaFree(d_inp);
   // END ASSIGN3_1
 
 }}

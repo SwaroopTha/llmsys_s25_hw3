@@ -44,6 +44,7 @@ class MultiHeadAttention(Module):
         self.n_head    = n_head
         self.causal    = causal
         self.attn_hidden_dim = n_embd // n_head
+        self.use_fused_kernel = use_fused_kernel
 
         # COPY FROM ASSIGN2_4
         self.q_projection = Linear(n_embd, n_embd, bias=bias, backend=backend)
@@ -115,7 +116,8 @@ class MultiHeadAttention(Module):
             result = output.permute(0, 2, 1, 3).contiguous().view(batch_size, queries_len, num_head * q_dim)
         else:
             # BEGIN ASSIGN3_3
-            M = tensor_from_numpy(np.zeros((1, 1, queries_len, queries_len), dtype=datatype), backend=self.backend)
+            # create a zero tensor with the same shape as attn_scores so that we can use the cuda kernel
+            M = tensor_from_numpy(np.zeros((batch_size, num_head, queries_len, queries_len), dtype=datatype), backend=self.backend)
             if self.causal:
                 attn_scores += self.create_causal_mask(batch_size, num_head, queries_len)
             result = attn_scores.attn_softmax(M) @ v # apply the cuda kernel
@@ -126,10 +128,8 @@ class MultiHeadAttention(Module):
 
     def forward(self, x):
         """Computes MultiHeadAttention with causal masking if needed. 
-
         Args:
             x : Tensor of shape (batch_size, seq_len, embedding_dim)
-
         Returns:
             output : Tensor of shape (batch_size, seq_len, embedding_dim)
         """
