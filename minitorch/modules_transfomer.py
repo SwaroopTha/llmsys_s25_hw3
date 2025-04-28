@@ -6,7 +6,10 @@ from .modules_basic import (
     Dropout,
     LayerNorm1d,
     Linear,
-    FusedLayerNorm1d,
+)
+from .tensor_functions import (
+    Attn_Softmax,
+    LayerNorm
 )
 from .tensor_ops import TensorBackend
 from .nn import (
@@ -107,13 +110,14 @@ class MultiHeadAttention(Module):
 
         attn_scores = (q @ kT) / (q_dim ** 0.5)
         if not self.use_fused_kernel:
-            # COPY FROM ASSIGN2_4
-            M = self.create_causal_mask(batch_size, num_head, queries_len) if self.causal else None
-            if M is not None:
-                attn_scores += M
-            attn_weights = softmax(attn_scores, dim=3)
-            output = attn_weights @ v
-            result = output.permute(0, 2, 1, 3).contiguous().view(batch_size, queries_len, num_head * q_dim)
+            if self.causal:
+                M = self.create_causal_mask(batch_size, num_head, queries_len)
+            else:
+                M = attn_scores.zeros(attn_scores.shape)
+
+            result = Attn_Softmax.apply(attn_scores, M)
+            result = result @ v
+            result = result.permute(0, 2, 1, 3).contiguous().view(batch_size, queries_len, num_head * q_dim)
         else:
             # BEGIN ASSIGN3_3
             # create a zero tensor with the same shape as attn_scores so that we can use the cuda kernel
@@ -205,15 +209,11 @@ class TransformerLayer(Module):
         self.ff = FeedForward(n_embd, p_dropout=p_dropout, bias=bias, backend=backend)
 
         self.use_fused_kernel = use_fused_kernel
-        if not self.use_fused_kernel:
-            # COPY FROM ASSIGN2_4
-            self.ln_1 = LayerNorm1d(n_embd, ln_eps, backend=backend)
-            self.ln_2 = LayerNorm1d(n_embd, ln_eps, backend=backend)
-        else:
-            # BEGIN ASSIGN3_3
-            self.ln_1 = FusedLayerNorm1d(n_embd, ln_eps, backend=backend)
-            self.ln_2 = FusedLayerNorm1d(n_embd, ln_eps, backend=backend)
-            # END ASSIGN3_3
+        self.backend = backend
+        # COPY FROM ASSIGN2_4
+        self.ln_1 = LayerNorm1d(n_embd, ln_eps, backend=backend)
+        self.ln_2 = LayerNorm1d(n_embd, ln_eps, backend=backend)
+        # END ASSIGN3_3
 
     def forward(self, x):
         """
@@ -225,14 +225,29 @@ class TransformerLayer(Module):
         residual = x
 
         x = x.view(batch_size * seq_len, x_dim)
-        x = self.ln_1(x)
+        if not self.use_fused_kernel:
+            x = self.ln_1(x)
+        else:
+            x = LayerNorm.apply(
+                x,
+                tensor_from_numpy(self.ln_1.weights.value.to_numpy(), backend=self.backend, requires_grad=True),
+                tensor_from_numpy(self.ln_1.bias.value.to_numpy(), backend=self.backend, requires_grad=True)
+            )
         x = x.view(batch_size, seq_len, x_dim)
 
         attn_out = self.attention(x) + residual
         residual = attn_out
 
         x = attn_out.view(batch_size * seq_len, x_dim)
-        x = self.ln_2(x)
+        if not self.use_fused_kernel:
+            x = self.ln_2(x)
+        else:
+            x = LayerNorm.apply(
+                x,
+                tensor_from_numpy(self.ln_2.weights.value.to_numpy(), backend=self.backend, requires_grad=True),
+                tensor_from_numpy(self.ln_2.bias.value.to_numpy(), backend=self.backend, requires_grad=True)
+            )
+
         x = x.view(batch_size, seq_len, x_dim)
 
         x = self.ff(x) + residual
@@ -300,14 +315,7 @@ class DecoderLM(Module):
         # raise NotImplementedError
 
         self.use_fused_kernel = use_fused_kernel
-        if not self.use_fused_kernel:
-            # COPY FROM ASSIGN2_4
-            self.ln                  = LayerNorm1d(n_embd, ln_eps, backend=backend)
-        else:
-            # BEGIN ASSIGN3_3
-            # raise NotImplementedError
-            self.ln = FusedLayerNorm1d(n_embd, ln_eps, backend=backend)
-            # END ASSIGN3_3
+        self.ln = LayerNorm1d(n_embd, ln_eps, backend=backend)
         
     def forward(self, idx):
         """A Forward pass of a Decoder-only Transformer Language model.
@@ -329,8 +337,16 @@ class DecoderLM(Module):
         x = self.t_layer_3(x)
         x = self.t_layer_4(x)
 
+        # reshape for layer norm
         x = x.view(batch_size * seq_len, self.n_embd)
-        x = self.ln(x)
+        if not self.use_fused_kernel:
+            x = self.ln(x)
+        else:
+            x = LayerNorm.apply(
+                x,
+                tensor_from_numpy(self.ln.weights.value.to_numpy(), backend=self.backend, requires_grad=True),
+                tensor_from_numpy(self.ln.bias.value.to_numpy(), backend=self.backend, requires_grad=True)
+            )
         x = x.view(batch_size, seq_len, self.n_embd)
 
         x = x.view(batch_size * seq_len, self.n_embd)

@@ -237,7 +237,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   gamma_buffer[threadIdx.y][threadIdx.x] = partial_dgamma;
   __syncthreads();
 
-  // tranpose the shared memory
+  // tranpose the shared memory for efficient reduction
   float betta_sum = betta_buffer[threadIdx.x][threadIdx.y];
   float gamma_sum = gamma_buffer[threadIdx.x][threadIdx.y];
   
@@ -249,7 +249,7 @@ __global__ void ker_ln_bw_dgamma_dbetta(T *gamma_grad, T *betta_grad,
   }
   
   // Step 4
-  if (g.thread_rank() == 0) {
+  if (g.thread_rank() == 0) { // check if the thread is the first thread in the block
     int output_col = blockIdx.x * TILE_DIM + threadIdx.y;
     if (output_col < width) {
       betta_grad[output_col] = betta_sum;
@@ -340,8 +340,8 @@ __global__ void ker_ln_bw_dinp(T *inp_grad, const T *out_grad, const T *inp,
 
    
   // Step 3: reduce sum for dxhat and dxhat*xhat with blockReduce
-  float block_combo[2] = {dxhat_sum, dxhat_xhat_sum};
-  blockReduce<ReduceType::kSum, 2>(block_combo);
+  float block_combo[2] = {dxhat_sum, dxhat_xhat_sum}; // combine the sum and square sum for less overhead
+  blockReduce<ReduceType::kSum, 2>(block_combo); // two 
   __shared__ float s_dxhat_sum, s_dxhat_xhat_sum;
   if (threadIdx.x == 0) {
     // average with hidden_dim
